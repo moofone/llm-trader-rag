@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_openai::{
+    config::OpenAIConfig,
     types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -57,8 +58,8 @@ pub struct LlmResponse {
 
 /// LLM client with rate limiting and retry logic
 pub struct LlmClient {
-    openai_client: Option<OpenAiClient>,
-    rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, governor::clock::DefaultClock>>,
+    openai_client: Option<OpenAiClient<OpenAIConfig>>,
+    rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
     config: LlmConfig,
 }
 
@@ -82,7 +83,8 @@ impl LlmClient {
         // Initialize provider-specific client
         let openai_client = match config.provider {
             LlmProvider::OpenAI => {
-                let client = OpenAiClient::new().with_api_key(api_key);
+                let openai_config = OpenAIConfig::new().with_api_key(api_key);
+                let client = OpenAiClient::with_config(openai_config);
                 Some(client)
             }
         };

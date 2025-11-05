@@ -98,7 +98,6 @@ impl RagMetrics {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         // Calculate percentiles
-        let len = sorted.len();
         self.outcome_median_4h = Some(percentile(&sorted, 50.0));
         self.outcome_p10_4h = Some(percentile(&sorted, 10.0));
         self.outcome_p90_4h = Some(percentile(&sorted, 90.0));

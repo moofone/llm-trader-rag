@@ -1,5 +1,7 @@
 [workspace]
-members = ["rag-ingest",
+members = [
+    "rag-ingest",
+    "rag-rpc-server",
     "trading-core",
     "trading-data-services",
     "trading-strategy",

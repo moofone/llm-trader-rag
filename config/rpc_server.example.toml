@@ -1,0 +1,47 @@
+# RAG JSON-RPC Server Configuration
+#
+# Copy this file to rpc_server.toml and customize for your environment
+
+[server]
+# Server bind address
+host = "0.0.0.0"
+port = 7879
+
+# Maximum concurrent connections
+max_connections = 100
+
+# Request timeout in milliseconds
+timeout_ms = 10000
+
+[rag]
+# Qdrant vector database URL
+qdrant_url = "http://localhost:6333"
+
+# Collection name for trading patterns
+collection_name = "trading_patterns"
+
+# Embedding model (must match ingestion)
+embedding_model = "bge-small-en-v1.5"
+
+# Cache embeddings for repeated queries
+cache_embeddings = true
+cache_ttl_seconds = 300
+
+[query_defaults]
+# Default query parameters if not specified in request
+lookback_days = 90
+top_k = 5
+min_similarity = 0.7
+
+# Minimum matches required (will error if less)
+min_matches = 3
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log format: text or json
+format = "text"
+
+# Log file path (optional, stdout if not specified)
+# file = "/var/log/rag-rpc-server.log"

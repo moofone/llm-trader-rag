@@ -199,19 +199,251 @@ cargo test
 cargo run --bin rag-ingest -- --help
 ```
 
+## Testing
+
+### Unit Tests (No Qdrant Required)
+
+Run all unit tests (mock data only):
+
+```bash
+# Run all tests
+export ORT_LIB_LOCATION=/tmp/onnxruntime/onnxruntime  # If needed for ONNX Runtime
+cargo test
+
+# Run tests for specific package
+cargo test --package trading-core
+cargo test --package trading-data-services
+cargo test --package trading-strategy
+
+# Run Phase 2 integration tests (prompt generation, no Qdrant needed)
+cargo test --package trading-strategy --test phase2_integration_test -- --nocapture
+
+# Run with output
+cargo test -- --nocapture
+
+# Test results summary
+# - trading-core: 4 tests
+# - trading-data-services: 5 tests (1 ignored - requires Qdrant)
+# - rag-ingest: 2 tests
+# - trading-strategy: 4 unit tests + 3 integration tests
+```
+
+### Integration Tests (Requires Qdrant)
+
+**Step 1: Start Qdrant**
+
+```bash
+# Using Docker (recommended)
+docker run -d -p 6333:6333 -p 6334:6334 --name qdrant qdrant/qdrant
+
+# Verify it's running
+curl http://localhost:6333/
+```
+
+**Step 2: Run Integration Tests**
+
+```bash
+# Run the ignored integration test for ingestion pipeline
+export ORT_LIB_LOCATION=/tmp/onnxruntime/onnxruntime  # If needed
+cargo test --package trading-data-services test_ingestion_pipeline -- --ignored --nocapture
+
+# This test will:
+# 1. Create a test collection in Qdrant
+# 2. Generate 100 mock market snapshots
+# 3. Convert to natural language
+# 4. Generate embeddings (384-dim vectors)
+# 5. Upload to Qdrant
+# 6. Verify successful storage
+```
+
+**Step 3: Manual End-to-End Test**
+
+```bash
+# 1. Start Qdrant (if not already running)
+docker start qdrant
+
+# 2. Run the ingestion CLI (uses mock data)
+export ORT_LIB_LOCATION=/tmp/onnxruntime/onnxruntime
+cargo run --bin rag-ingest -- \
+  --symbols BTCUSDT \
+  --start 7 \
+  --end now \
+  --interval 60 \
+  --log-level debug
+
+# 3. Verify data in Qdrant
+curl http://localhost:6333/collections/trading_patterns
+
+# Expected output:
+# {
+#   "result": {
+#     "status": "green",
+#     "vectors_count": <number>,
+#     "points_count": <number>,
+#     ...
+#   }
+# }
+
+# 4. Query a sample point
+curl -X POST http://localhost:6333/collections/trading_patterns/points/scroll \
+  -H 'Content-Type: application/json' \
+  -d '{"limit": 1, "with_payload": true, "with_vector": false}'
+```
+
+**Step 4: Phase 2 RAG Retrieval Test**
+
+Once you have data in Qdrant, you can test the pattern retrieval:
+
+```bash
+# Run Phase 2 integration tests
+cargo test --package trading-strategy --test phase2_integration_test -- --nocapture
+
+# This test verifies:
+# 1. Baseline prompt generation (no RAG)
+# 2. RAG-enhanced prompt with historical matches
+# 3. Statistical analysis (percentiles, win rates)
+# 4. Edge cases (oversold, minimal matches, empty results)
+```
+
+### Test Coverage
+
+Current test coverage:
+
+- **trading-core**: Market snapshot creation, field calculations
+- **trading-data-services**: Snapshot formatting, extraction, vector store operations, ingestion pipeline
+- **rag-ingest**: CLI argument parsing, date parsing
+- **trading-strategy (Phase 2)**:
+  - Historical match creation
+  - Baseline prompt formatting
+  - RAG-enhanced prompt formatting
+  - Statistical outcome analysis
+  - End-to-end prompt generation flow
+
+### Troubleshooting Tests
+
+**ONNX Runtime Issues:**
+
+```bash
+# If you see TLS certificate errors during build/test:
+# 1. Manually download ONNX Runtime
+curl -k -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz -o /tmp/onnxruntime.tgz
+mkdir -p /tmp/onnxruntime
+tar -xzf /tmp/onnxruntime.tgz -C /tmp/onnxruntime --strip-components=1
+
+# 2. Set environment variable
+export ORT_LIB_LOCATION=/tmp/onnxruntime/lib
+
+# 3. Run tests
+cargo test
+```
+
+**Qdrant Connection Issues:**
+
+```bash
+# Check if Qdrant is running
+curl http://localhost:6333/
+
+# Check Docker container status
+docker ps | grep qdrant
+
+# View Qdrant logs
+docker logs qdrant
+
+# Restart Qdrant
+docker restart qdrant
+```
+
 ## Usage
 
 ### Prerequisites
 
-1. **Qdrant Vector Database:**
-   ```bash
-   # Using Docker
-   docker run -p 6333:6333 qdrant/qdrant
+#### 1. Qdrant Vector Database
 
-   # Or download from https://qdrant.tech/
-   ```
+**Option A: Docker (Recommended)**
 
-2. **LMDB Data** (or use mock data for testing)
+Start Qdrant in a Docker container:
+
+```bash
+# Run Qdrant with default settings
+docker run -p 6333:6333 -p 6334:6334 \
+  -v $(pwd)/qdrant_storage:/qdrant/storage:z \
+  qdrant/qdrant
+
+# Run in background (detached mode)
+docker run -d -p 6333:6333 -p 6334:6334 \
+  --name qdrant \
+  -v $(pwd)/qdrant_storage:/qdrant/storage:z \
+  qdrant/qdrant
+
+# Check if Qdrant is running
+curl http://localhost:6333/collections
+
+# View logs
+docker logs qdrant
+
+# Stop Qdrant
+docker stop qdrant
+
+# Start existing container
+docker start qdrant
+```
+
+**Option B: Docker Compose**
+
+Create `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"  # REST API
+      - "6334:6334"  # gRPC API
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+```
+
+Then run:
+
+```bash
+docker-compose up -d
+docker-compose logs -f qdrant
+docker-compose down
+```
+
+**Option C: Native Installation**
+
+Download from https://qdrant.tech/documentation/guides/installation/
+
+```bash
+# Linux/macOS
+wget https://github.com/qdrant/qdrant/releases/download/v1.7.0/qdrant-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf qdrant-x86_64-unknown-linux-gnu.tar.gz
+./qdrant
+
+# Or use package manager
+# Homebrew (macOS)
+brew install qdrant
+
+# Then run
+qdrant
+```
+
+**Verify Installation:**
+
+```bash
+# Check Qdrant is running
+curl http://localhost:6333/
+
+# Expected response:
+# {"title":"qdrant - vector search engine","version":"1.x.x"}
+```
+
+#### 2. LMDB Data (or use mock data for testing)
+
+The current implementation uses mock data for testing. Integration with actual LMDB manager is pending.
 
 ### Running Ingestion
 

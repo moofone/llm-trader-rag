@@ -6,6 +6,8 @@ use std::sync::Arc;
 use trading_core::MarketStateSnapshot;
 use trading_data_services::{SnapshotFormatter, VectorStore};
 
+use crate::llm::metrics::{MetricsTimer, RagMetrics};
+
 /// A historical pattern match with its market state and outcomes
 #[derive(Debug, Clone)]
 pub struct HistoricalMatch {
@@ -56,7 +58,7 @@ impl RagRetriever {
         })
     }
 
-    /// Find similar historical patterns for the current market state
+    /// Find similar historical patterns for the current market state with metrics
     ///
     /// # Arguments
     /// * `current_snapshot` - Current market state
@@ -64,13 +66,18 @@ impl RagRetriever {
     /// * `top_k` - Maximum number of similar patterns to return
     ///
     /// # Returns
-    /// Vector of historical matches, empty if fewer than `min_matches` found
-    pub async fn find_similar_patterns(
+    /// Tuple of (matches, metrics)
+    pub async fn find_similar_patterns_with_metrics(
         &self,
         current_snapshot: &MarketStateSnapshot,
         lookback_days: u32,
         top_k: usize,
-    ) -> Result<Vec<HistoricalMatch>> {
+    ) -> Result<(Vec<HistoricalMatch>, RagMetrics)> {
+        let mut metrics = RagMetrics::new();
+
+        // Time embedding generation
+        let embedding_timer = MetricsTimer::start();
+
         tracing::debug!(
             "Searching for similar patterns: symbol={}, lookback_days={}, top_k={}",
             current_snapshot.symbol,
@@ -87,7 +94,11 @@ impl RagRetriever {
             .next()
             .ok_or_else(|| anyhow!("Failed to generate embedding"))?;
 
+        metrics.set_embedding_latency(embedding_timer.stop());
         tracing::debug!("Generated query embedding (384 dimensions)");
+
+        // Time retrieval
+        let retrieval_timer = MetricsTimer::start();
 
         // 2. Build filter for recency and symbol
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
@@ -204,6 +215,8 @@ impl RagRetriever {
             )
             .await?;
 
+        metrics.set_retrieval_latency(retrieval_timer.stop());
+
         tracing::info!(
             "Found {} similar patterns (similarity threshold: 0.7)",
             scored_points.len()
@@ -211,9 +224,13 @@ impl RagRetriever {
 
         // 4. Parse results into HistoricalMatch structs
         let mut matches = Vec::new();
+        let mut similarity_scores = Vec::new();
+        let mut outcome_4h_values = Vec::new();
 
         for scored_point in scored_points {
             let payload = scored_point.payload;
+
+            similarity_scores.push(scored_point.score);
 
             let historical_match = HistoricalMatch {
                 similarity: scored_point.score,
@@ -234,8 +251,17 @@ impl RagRetriever {
                 hit_take_profit: Self::get_payload_bool_opt(&payload, "hit_take_profit"),
             };
 
+            // Collect outcome_4h for distribution analysis
+            if let Some(outcome) = historical_match.outcome_4h {
+                outcome_4h_values.push(outcome);
+            }
+
             matches.push(historical_match);
         }
+
+        // Update metrics with similarity and outcome data
+        metrics.set_similarity_scores(similarity_scores);
+        metrics.set_outcomes(outcome_4h_values);
 
         // 5. Enforce minimum match count (fallback to baseline if insufficient)
         if matches.len() < self.min_matches {
@@ -244,7 +270,7 @@ impl RagRetriever {
                 matches.len(),
                 self.min_matches
             );
-            return Ok(Vec::new());
+            return Ok((Vec::new(), metrics));
         }
 
         tracing::info!(
@@ -255,6 +281,28 @@ impl RagRetriever {
             matches.iter().map(|m| m.similarity).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(0.0),
         );
 
+        Ok((matches, metrics))
+    }
+
+    /// Find similar historical patterns for the current market state
+    ///
+    /// # Arguments
+    /// * `current_snapshot` - Current market state
+    /// * `lookback_days` - How many days back to search
+    /// * `top_k` - Maximum number of similar patterns to return
+    ///
+    /// # Returns
+    /// Vector of historical matches, empty if fewer than `min_matches` found
+    pub async fn find_similar_patterns(
+        &self,
+        current_snapshot: &MarketStateSnapshot,
+        lookback_days: u32,
+        top_k: usize,
+    ) -> Result<Vec<HistoricalMatch>> {
+        // Delegate to the metrics version and discard metrics
+        let (matches, _metrics) = self
+            .find_similar_patterns_with_metrics(current_snapshot, lookback_days, top_k)
+            .await?;
         Ok(matches)
     }
 

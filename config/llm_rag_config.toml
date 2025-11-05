@@ -1,0 +1,33 @@
+# LLM Trading Bot - RAG Configuration
+# Phase 5: Configuration & Monitoring
+
+[llm]
+# LLM provider configuration
+provider = "openai"           # "openai" or "anthropic"
+model = "gpt-4-turbo"
+api_key_env = "OPENAI_API_KEY"
+max_tokens = 500
+temperature = 0.1
+requests_per_minute = 10      # Rate limiting
+timeout_seconds = 30
+
+[rag]
+# Vector database
+collection_name = "trading_patterns_btc"
+qdrant_url = "http://localhost:6333"   # Embedded for dev
+# OR: "https://your-cluster.aws.cloud.qdrant.io" for cloud
+
+# Retrieval parameters
+top_k = 5                     # Return top-5 similar patterns
+lookback_days = 90            # Search last 90 days
+similarity_threshold = 0.7    # Only return matches with similarity > 0.7
+min_matches = 3               # Fallback to baseline if fewer than this
+use_regime_filters = true     # Apply OI/funding/volatility filters
+# Optional ANN tuning
+# ef_search = 128
+
+[ingestion]
+# Batch processing for efficiency
+snapshot_interval_minutes = 15
+batch_size = 100
+symbols = ["BTCUSDT", "ETHUSDT"]

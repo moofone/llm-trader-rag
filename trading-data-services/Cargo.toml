@@ -1,0 +1,24 @@
+[package]
+name = "trading-data-services"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+trading-core = { path = "../trading-core" }
+
+# Workspace dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# RAG infrastructure
+fastembed = { workspace = true }
+qdrant-client = { workspace = true }
+
+# Storage (placeholder - will integrate with actual LMDB setup)
+lmdb = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "rag-ingest"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+trading-core = { path = "../trading-core" }
+trading-data-services = { path = "../trading-data-services" }
+
+# Workspace dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }

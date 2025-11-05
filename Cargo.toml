@@ -1,0 +1,39 @@
+[workspace]
+members = ["rag-ingest",
+    "trading-core",
+    "trading-data-services",
+    "trading-strategy",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["LLM Trading Bot Team"]
+
+[workspace.dependencies]
+# Core dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+
+# RAG infrastructure
+# Using download-binaries feature to auto-download ONNX runtime
+fastembed = { version = "4.1", features = ["online"] }
+qdrant-client = "1.12"
+moka = { version = "0.12", features = ["future"] }
+
+# LLM clients
+async-openai = "0.24"
+governor = "0.6"
+
+# Storage
+lmdb = "0.8"
+
+# CLI tools
+clap = { version = "4.4", features = ["derive"] }

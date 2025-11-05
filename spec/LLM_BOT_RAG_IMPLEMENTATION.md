@@ -3,7 +3,6 @@
 **Status:** Ready for implementation
 **Language:** Pure Rust
 **Architecture:** Qdrant + FastEmbed-rs + Async OpenAI/Anthropic SDK
-**Timeline:** 2-3 weeks for MVP
 
 ---
 
@@ -1346,7 +1345,312 @@ pub struct LlmResponse {
 
 ---
 
-## Phase 4: Integration as Strategy Plugin
+## Phase 4: JSON-RPC Server for workflow-manager Integration
+
+### Overview
+
+The `llm-trader-rag` service exposes a JSON-RPC 2.0 API that `workflow-manager` queries to retrieve historical pattern matches. This keeps RAG functionality isolated from LLM client logic.
+
+### Architecture Flow
+
+```
+llm-trader-data → sends market snapshot → workflow-manager
+                                                ↓
+                                    workflow-manager queries via JSON-RPC
+                                                ↓
+                                          llm-trader-rag
+                                          (this service)
+                                                ↓
+                                    returns historical matches + stats
+                                                ↓
+                                    workflow-manager → formats prompt → LLM
+```
+
+### RPC Method: `rag.query_patterns`
+
+**File:** `rag-rpc-server/src/main.rs`
+
+```rust
+use serde::{Deserialize, Serialize};
+use tokio::net::TcpListener;
+
+#[derive(Debug, Deserialize)]
+pub struct RagQueryRequest {
+    pub symbol: String,
+    pub timestamp: u64,
+    pub current_state: MarketState,
+    pub query_config: Option<QueryConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MarketState {
+    pub price: f64,
+    pub rsi_7: f64,
+    pub rsi_14: f64,
+    pub macd: f64,
+    pub ema_20: f64,
+    pub ema_20_4h: f64,
+    pub ema_50_4h: f64,
+    pub funding_rate: f64,
+    pub open_interest_latest: f64,
+    pub open_interest_avg_24h: f64,
+    pub price_change_1h: Option<f64>,
+    pub price_change_4h: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryConfig {
+    #[serde(default = "default_lookback_days")]
+    pub lookback_days: u32,
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+    #[serde(default = "default_min_similarity")]
+    pub min_similarity: f32,
+    #[serde(default = "default_include_regime_filters")]
+    pub include_regime_filters: bool,
+}
+
+fn default_lookback_days() -> u32 { 90 }
+fn default_top_k() -> usize { 5 }
+fn default_min_similarity() -> f32 { 0.7 }
+fn default_include_regime_filters() -> bool { true }
+
+#[derive(Debug, Serialize)]
+pub struct RagQueryResponse {
+    pub matches: Vec<HistoricalMatchJson>,
+    pub statistics: Statistics,
+    pub metadata: Metadata,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoricalMatchJson {
+    pub similarity: f32,
+    pub timestamp: u64,
+    pub date: String,
+    pub market_state: MatchMarketState,
+    pub outcomes: Outcomes,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MatchMarketState {
+    pub rsi_7: f64,
+    pub rsi_14: f64,
+    pub macd: f64,
+    pub ema_ratio: f64,
+    pub oi_delta_pct: f64,
+    pub funding_rate: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Outcomes {
+    pub outcome_1h: Option<f64>,
+    pub outcome_4h: Option<f64>,
+    pub outcome_24h: Option<f64>,
+    pub max_runup_1h: Option<f64>,
+    pub max_drawdown_1h: Option<f64>,
+    pub hit_stop_loss: Option<bool>,
+    pub hit_take_profit: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Statistics {
+    pub total_matches: usize,
+    pub avg_similarity: f32,
+    pub similarity_range: [f32; 2],
+    pub outcome_4h: OutcomeStats,
+    pub stop_loss_hits: usize,
+    pub take_profit_hits: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OutcomeStats {
+    pub mean: f64,
+    pub median: f64,
+    pub p10: f64,
+    pub p90: f64,
+    pub positive_count: usize,
+    pub negative_count: usize,
+    pub win_rate: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Metadata {
+    pub query_duration_ms: u64,
+    pub embedding_duration_ms: u64,
+    pub retrieval_duration_ms: u64,
+    pub filters_applied: Vec<String>,
+    pub schema_version: u32,
+    pub feature_version: String,
+    pub embedding_model: String,
+}
+
+async fn handle_rag_query(
+    params: RagQueryRequest,
+    rag_retriever: Arc<RagRetriever>,
+) -> Result<RagQueryResponse> {
+    let start = Instant::now();
+
+    // Convert request to MarketStateSnapshot
+    let snapshot = MarketStateSnapshot {
+        symbol: params.symbol,
+        timestamp: params.timestamp,
+        price: params.current_state.price,
+        rsi_7: params.current_state.rsi_7,
+        rsi_14: params.current_state.rsi_14,
+        macd: params.current_state.macd,
+        ema_20: params.current_state.ema_20,
+        // ... map remaining fields
+    };
+
+    let config = params.query_config.unwrap_or_default();
+
+    // Query RAG
+    let embedding_start = Instant::now();
+    let matches = rag_retriever
+        .find_similar_patterns(&snapshot, config.lookback_days, config.top_k)
+        .await?;
+    let embedding_duration = embedding_start.elapsed().as_millis() as u64;
+
+    // Calculate statistics
+    let statistics = calculate_statistics(&matches);
+
+    let query_duration = start.elapsed().as_millis() as u64;
+
+    Ok(RagQueryResponse {
+        matches: matches.into_iter().map(|m| convert_match(m)).collect(),
+        statistics,
+        metadata: Metadata {
+            query_duration_ms: query_duration,
+            embedding_duration_ms: embedding_duration,
+            retrieval_duration_ms: query_duration - embedding_duration,
+            filters_applied: vec!["symbol".to_string(), "timerange".to_string()],
+            schema_version: 1,
+            feature_version: "v1_nofx_3m4h".to_string(),
+            embedding_model: "bge-small-en-v1.5".to_string(),
+        },
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize RAG components
+    let vector_store = Arc::new(VectorStore::new("http://localhost:6333", "trading_patterns").await?);
+    let rag_retriever = Arc::new(RagRetriever::new(vector_store, 3).await?);
+
+    // Start JSON-RPC server
+    let listener = TcpListener::bind("0.0.0.0:7879").await?;
+    tracing::info!("RAG RPC server listening on port 7879");
+
+    loop {
+        let (socket, _) = listener.accept().await?;
+        let retriever = Arc::clone(&rag_retriever);
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(socket, retriever).await {
+                tracing::error!("Connection error: {}", e);
+            }
+        });
+    }
+}
+```
+
+### workflow-manager Integration
+
+**Workflow Node Definition**: `workflow-manager/workflows/llm-trader/nodes/rag-query.yml`
+
+```yaml
+name: rag-query
+type: tool
+description: Query RAG service for similar historical patterns
+inputs:
+  - name: market_data
+    type: object
+    required: true
+    schema: "../schemas/market-snapshot.json"
+outputs:
+  - name: rag_data
+    type: object
+    schema: "../schemas/rag-query-response.json"
+config:
+  rpc:
+    host: localhost
+    port: 7879
+    method: rag.query_patterns
+    timeout_ms: 5000
+  query:
+    lookback_days: 90
+    top_k: 5
+    min_similarity: 0.7
+```
+
+**Main Workflow**: `workflow-manager/workflows/llm-trader/main.yml`
+
+```yaml
+name: llm-trader-workflow
+nodes:
+  - id: receive-snapshot
+    type: input
+    description: Receive market data from llm-trader-data
+
+  - id: query-rag
+    type: tool
+    ref: nodes/rag-query.yml
+    inputs:
+      market_data: ${receive-snapshot.output}
+
+  - id: format-llm-prompt
+    type: script
+    inputs:
+      market_data: ${receive-snapshot.output}
+      rag_data: ${query-rag.output}
+    script: |
+      const { formatPromptWithRAG } = require('./lib/prompt-formatter');
+      return { prompt: formatPromptWithRAG(inputs) };
+
+  - id: call-llm
+    type: llm
+    inputs:
+      prompt: ${format-llm-prompt.output.prompt}
+    config:
+      model: claude-3-5-sonnet-20241022
+      temperature: 0.1
+
+  - id: execute-decision
+    type: script
+    inputs:
+      llm_response: ${call-llm.output}
+    script: |
+      // Parse and execute trade decision
+      return executeTradeDecision(inputs.llm_response);
+
+edges:
+  - from: receive-snapshot
+    to: query-rag
+  - from: query-rag
+    to: format-llm-prompt
+  - from: format-llm-prompt
+    to: call-llm
+  - from: call-llm
+    to: execute-decision
+```
+
+### JSON Schemas
+
+**Request Schema**: `workflow-manager/schemas/rag-query-request.json`
+
+See `docs/architecture/jsonrpc_api.md` for complete schema definitions.
+
+**Response Schema**: `workflow-manager/schemas/rag-query-response.json`
+
+See `docs/architecture/jsonrpc_api.md` for complete schema definitions.
+
+---
+
+## Phase 5: Integration as Strategy Plugin (Deprecated)
+
+**Note**: This phase is deprecated in favor of Phase 4 (JSON-RPC integration with workflow-manager). The strategy plugin approach is kept for reference but should not be implemented.
+
+**Original approach** (not recommended):
 
 **File:** `trading-strategy/src/strategy/strategies/llm_rag_v1.rs`
 
@@ -1777,6 +2081,547 @@ metrics.finalize();
 
 ---
 
+## Phase 7: Historical Data Integration with llm-trader-data
+
+### Overview
+
+Establish `llm-trader-data` as the **single source of truth** for all historical data fetching and storage. This RAG service (`llm-trader-rag`) will consume historical data without duplicating data fetching logic.
+
+### Problem Statement
+
+Both `llm-trader-rag` and `llm-trader-data` need historical market data:
+- **llm-trader-rag**: Needs historical snapshots for RAG ingestion (embedding + indexing)
+- **llm-trader-data**: Already fetches historical data from exchanges (Bybit, Binance)
+
+**Risk**: Duplicating data fetching logic leads to:
+- Inconsistent data between services
+- Duplicate API calls to exchanges
+- Increased complexity and maintenance burden
+- Potential data drift and versioning issues
+
+### Architecture: Single Source of Truth
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      llm-trader-data                            │
+│  (Single Source of Truth for Historical Data)                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────┐         ┌──────────────────┐            │
+│  │ Exchange APIs   │────────▶│  Data Fetcher    │            │
+│  │ (Bybit, Binance)│         │  - Candles       │            │
+│  └─────────────────┘         │  - Indicators    │            │
+│                               │  - Derivatives   │            │
+│                               └────────┬─────────┘            │
+│                                        │                       │
+│                                        ▼                       │
+│                               ┌──────────────────┐            │
+│                               │ Shared Storage   │            │
+│                               │  - LMDB          │            │
+│                               │  - S3/File       │            │
+│                               │  - PostgreSQL    │            │
+│                               └────────┬─────────┘            │
+│                                        │                       │
+│                                        │                       │
+└────────────────────────────────────────┼───────────────────────┘
+                                         │
+                                         │ Read Access
+                                         │
+                      ┌──────────────────▼──────────────────┐
+                      │     llm-trader-rag                  │
+                      │  (Consumer of Historical Data)      │
+                      ├─────────────────────────────────────┤
+                      │                                     │
+                      │  ┌─────────────────────┐           │
+                      │  │ Snapshot Extractor  │           │
+                      │  │  (Reads from LMDB)  │           │
+                      │  └──────────┬──────────┘           │
+                      │             ▼                       │
+                      │  ┌─────────────────────┐           │
+                      │  │ Ingestion Pipeline  │           │
+                      │  │  - Embedding        │           │
+                      │  │  - Qdrant upload    │           │
+                      │  └─────────────────────┘           │
+                      │                                     │
+                      └─────────────────────────────────────┘
+```
+
+### Option 1: Shared LMDB Storage (Recommended)
+
+**Design:**
+- `llm-trader-data` writes all historical data to LMDB
+- `llm-trader-rag` reads from the same LMDB (read-only access)
+- Both services share the same LMDB path via configuration
+
+**Pros:**
+- Zero network overhead (local file system)
+- Fast reads (<10ms per snapshot)
+- Simple integration (already using LMDB)
+- Natural fit for time-series data
+- ACID guarantees
+
+**Cons:**
+- Services must run on same host (or shared volume)
+- Read-only access must be carefully managed
+
+**Implementation:**
+
+```rust
+// shared config (llm-trader-data writes, llm-trader-rag reads)
+[storage]
+lmdb_path = "/shared/data/trading/lmdb"
+read_only = true  # for llm-trader-rag
+
+// llm-trader-rag
+impl HistoricalSnapshotExtractor {
+    pub fn new(lmdb_path: &str) -> Result<Self> {
+        let lmdb_manager = LmdbManager::open_read_only(lmdb_path)?;
+        Ok(Self { lmdb_manager })
+    }
+}
+```
+
+**File structure:**
+```
+/shared/data/trading/lmdb/
+├── candles_BTCUSDT_3m/
+├── candles_BTCUSDT_4h/
+├── indicators_BTCUSDT_3m/
+├── indicators_BTCUSDT_4h/
+└── derivatives_BTCUSDT/
+```
+
+### Option 2: Shared File Storage (S3/Local Files)
+
+**Design:**
+- `llm-trader-data` periodically exports snapshots to JSON/Parquet files
+- `llm-trader-rag` reads from these files
+
+**Pros:**
+- Services can run on different hosts
+- Cloud-native (S3, GCS)
+- Easy to version and backup
+- Simple to inspect (JSON/Parquet)
+
+**Cons:**
+- Higher latency than LMDB
+- Need file sync mechanism
+- Additional storage layer
+
+**Implementation:**
+
+```rust
+// llm-trader-data exports
+[export]
+output_path = "s3://trading-data/snapshots/"
+format = "parquet"  # or "jsonl"
+interval = "15m"
+symbols = ["BTCUSDT", "ETHUSDT"]
+
+// llm-trader-rag reads
+impl HistoricalSnapshotExtractor {
+    pub fn new(storage_path: &str) -> Result<Self> {
+        let reader = ParquetReader::new(storage_path)?;
+        Ok(Self { reader })
+    }
+}
+```
+
+**File structure:**
+```
+s3://trading-data/snapshots/
+├── BTCUSDT/
+│   ├── 2025-08-01.parquet
+│   ├── 2025-08-02.parquet
+│   └── ...
+└── ETHUSDT/
+    ├── 2025-08-01.parquet
+    └── ...
+```
+
+### Option 3: API Endpoints (Service-to-Service)
+
+**Design:**
+- `llm-trader-data` exposes HTTP/gRPC API
+- `llm-trader-rag` calls API to fetch historical data
+
+**Pros:**
+- Complete service isolation
+- Works across networks
+- Fine-grained access control
+- Easy to add caching/rate limiting
+
+**Cons:**
+- Network latency overhead
+- Additional API surface to maintain
+- More complex error handling
+- Requires service discovery
+
+**Implementation:**
+
+```rust
+// llm-trader-data API
+#[get("/snapshots/{symbol}")]
+async fn get_snapshots(
+    symbol: String,
+    start: TimestampMS,
+    end: TimestampMS,
+    interval: u64,
+) -> Result<Vec<MarketStateSnapshot>> {
+    // Query LMDB and return snapshots
+}
+
+// llm-trader-rag client
+impl HistoricalSnapshotExtractor {
+    pub async fn extract_snapshots(
+        &self,
+        symbol: &str,
+        start: TimestampMS,
+        end: TimestampMS,
+    ) -> Result<Vec<MarketStateSnapshot>> {
+        let url = format!("{}/snapshots/{}", self.api_url, symbol);
+        let response = self.http_client
+            .get(url)
+            .query(&[("start", start), ("end", end)])
+            .send()
+            .await?;
+        Ok(response.json().await?)
+    }
+}
+```
+
+### Option 4: Shared Database (PostgreSQL/TimescaleDB)
+
+**Design:**
+- `llm-trader-data` writes to PostgreSQL/TimescaleDB
+- `llm-trader-rag` queries the same database
+
+**Pros:**
+- SQL queries (flexible filtering)
+- Works across networks
+- Time-series optimizations (TimescaleDB)
+- Transaction support
+
+**Cons:**
+- Added infrastructure complexity
+- Slower than LMDB for sequential reads
+- Network overhead
+- Requires database maintenance
+
+**Implementation:**
+
+```sql
+-- Schema (llm-trader-data creates)
+CREATE TABLE market_snapshots (
+    symbol TEXT,
+    timestamp BIGINT,
+    price DOUBLE PRECISION,
+    rsi_7 DOUBLE PRECISION,
+    rsi_14 DOUBLE PRECISION,
+    macd DOUBLE PRECISION,
+    -- ... all fields
+    outcome_4h DOUBLE PRECISION,
+    PRIMARY KEY (symbol, timestamp)
+);
+
+-- llm-trader-rag queries
+SELECT * FROM market_snapshots
+WHERE symbol = 'BTCUSDT'
+  AND timestamp BETWEEN $1 AND $2
+ORDER BY timestamp;
+```
+
+### Recommendation: Hybrid Approach
+
+**Combine Option 1 (LMDB) + Option 2 (File Export):**
+
+1. **Primary Path (Fast):** Shared LMDB for local ingestion
+   - Use when both services run on same host/cluster
+   - Fast, low-latency, real-time
+
+2. **Fallback Path (Portable):** File export to S3/local files
+   - Use for batch ingestion or distributed deployment
+   - Periodic exports (daily/hourly)
+   - Snapshot backups
+
+**Configuration:**
+
+```toml
+[historical_data]
+# Primary source (fast local access)
+source = "lmdb"
+lmdb_path = "/shared/data/trading/lmdb"
+read_only = true
+
+# Fallback source (distributed/batch)
+fallback_source = "files"
+files_path = "s3://trading-data/snapshots/"
+files_format = "parquet"
+
+# Data freshness requirements
+max_staleness_minutes = 30
+require_outcomes = true  # Skip snapshots without calculated outcomes
+```
+
+### Implementation Steps
+
+#### Step 7.1: Define Shared Data Schema
+
+**File:** `trading-core/src/types/data_schema.rs`
+
+```rust
+/// Schema version for historical data
+/// Increment when snapshot structure changes
+pub const DATA_SCHEMA_VERSION: u32 = 1;
+
+/// Feature version for RAG (indicators used)
+/// Format: "v{version}_{system}_{timeframes}"
+pub const FEATURE_VERSION: &str = "v1_nofx_3m4h";
+
+/// Exchange source (must match across services)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ExchangeSource {
+    Bybit,
+    Binance,
+    Mock,
+}
+
+/// Metadata for data provenance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataProvenance {
+    pub schema_version: u32,
+    pub feature_version: String,
+    pub exchange: ExchangeSource,
+    pub ingestion_timestamp: TimestampMS,
+    pub build_id: Option<String>,
+}
+```
+
+#### Step 7.2: Update llm-trader-data Export
+
+**File:** `llm-trader-data/src/export/snapshot_exporter.rs`
+
+```rust
+pub struct SnapshotExporter {
+    lmdb_manager: Arc<LmdbManager>,
+    output_path: PathBuf,
+    format: ExportFormat,
+}
+
+impl SnapshotExporter {
+    /// Export snapshots to shared storage
+    pub async fn export_daily_batch(
+        &self,
+        symbol: &str,
+        date: NaiveDate,
+    ) -> Result<ExportStats> {
+        // Extract snapshots from LMDB (with outcomes calculated)
+        let snapshots = self.extract_with_outcomes(symbol, date)?;
+
+        // Write to file (parquet, jsonl, etc.)
+        match self.format {
+            ExportFormat::Parquet => self.write_parquet(symbol, date, snapshots).await?,
+            ExportFormat::JsonLines => self.write_jsonl(symbol, date, snapshots).await?,
+        }
+
+        Ok(ExportStats { count: snapshots.len() })
+    }
+}
+```
+
+#### Step 7.3: Update llm-trader-rag Ingestion
+
+**File:** `trading-data-services/src/rag/snapshot_extractor.rs`
+
+```rust
+pub enum DataSource {
+    Lmdb { path: PathBuf, read_only: bool },
+    Files { path: String, format: FileFormat },
+}
+
+pub struct HistoricalSnapshotExtractor {
+    source: DataSource,
+}
+
+impl HistoricalSnapshotExtractor {
+    pub fn new(config: DataSourceConfig) -> Result<Self> {
+        let source = match config.source_type {
+            SourceType::Lmdb => {
+                DataSource::Lmdb {
+                    path: config.lmdb_path,
+                    read_only: true,
+                }
+            }
+            SourceType::Files => {
+                DataSource::Files {
+                    path: config.files_path,
+                    format: config.files_format,
+                }
+            }
+        };
+
+        Ok(Self { source })
+    }
+
+    pub fn extract_snapshots(
+        &self,
+        symbol: &str,
+        start: TimestampMS,
+        end: TimestampMS,
+    ) -> Result<Vec<MarketStateSnapshot>> {
+        match &self.source {
+            DataSource::Lmdb { path, .. } => {
+                self.extract_from_lmdb(path, symbol, start, end)
+            }
+            DataSource::Files { path, format } => {
+                self.extract_from_files(path, format, symbol, start, end)
+            }
+        }
+    }
+}
+```
+
+#### Step 7.4: Data Validation & Schema Enforcement
+
+**File:** `trading-core/src/types/validation.rs`
+
+```rust
+impl MarketStateSnapshot {
+    /// Validate snapshot meets requirements
+    pub fn validate(&self) -> Result<()> {
+        // Check schema version
+        if self.provenance.schema_version != DATA_SCHEMA_VERSION {
+            bail!("Schema version mismatch: expected {}, got {}",
+                DATA_SCHEMA_VERSION, self.provenance.schema_version);
+        }
+
+        // Check outcomes are present (required for RAG)
+        if self.outcome_1h.is_none() || self.outcome_4h.is_none() {
+            bail!("Missing required outcomes");
+        }
+
+        // Check for NaN/Inf
+        if self.price.is_nan() || self.price.is_infinite() {
+            bail!("Invalid price: {}", self.price);
+        }
+
+        // Check timestamp is reasonable
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        if self.timestamp > now {
+            bail!("Future timestamp: {}", self.timestamp);
+        }
+
+        Ok(())
+    }
+}
+```
+
+### Data Freshness & Synchronization
+
+**Approach:**
+- `llm-trader-data` runs continuously, updating LMDB/files
+- `llm-trader-rag` ingestion can run:
+  - **Real-time mode**: Watch LMDB for new data (via polling/inotify)
+  - **Batch mode**: Periodic ingestion (hourly/daily)
+  - **Backfill mode**: One-time historical ingestion
+
+**Configuration:**
+
+```toml
+[ingestion]
+mode = "batch"  # "real-time" | "batch" | "backfill"
+batch_interval_hours = 1
+lookback_days = 90
+
+[freshness]
+max_staleness_minutes = 30
+enforce_outcomes = true
+```
+
+### Monitoring & Observability
+
+**Metrics to track:**
+
+```rust
+pub struct DataIntegrationMetrics {
+    pub last_sync_timestamp: TimestampMS,
+    pub snapshots_read: usize,
+    pub snapshots_validated: usize,
+    pub snapshots_rejected: usize,
+    pub schema_mismatches: usize,
+    pub data_staleness_minutes: u64,
+}
+```
+
+**Alerts:**
+- Data staleness exceeds threshold
+- Schema version mismatch detected
+- High rejection rate (>5% of snapshots)
+- Missing required outcomes
+
+### Testing Strategy
+
+**Unit Tests:**
+```rust
+#[test]
+fn test_shared_lmdb_read() {
+    // llm-trader-data writes snapshot
+    // llm-trader-rag reads same snapshot
+    // Assert data matches
+}
+
+#[test]
+fn test_schema_validation() {
+    // Create snapshot with wrong schema version
+    // Assert validation fails
+}
+```
+
+**Integration Tests:**
+```rust
+#[tokio::test]
+async fn test_end_to_end_data_flow() {
+    // 1. llm-trader-data fetches from mock exchange
+    // 2. llm-trader-data writes to LMDB
+    // 3. llm-trader-rag reads from LMDB
+    // 4. llm-trader-rag generates embeddings
+    // 5. Assert data consistency
+}
+```
+
+### Migration Plan
+
+**Phase 1: Current State (Mock Data)**
+- `llm-trader-rag` uses mock data generator
+- No dependency on `llm-trader-data`
+
+**Phase 2: Shared LMDB (Local)**
+- Deploy both services on same host
+- `llm-trader-data` writes to LMDB
+- `llm-trader-rag` reads from LMDB (read-only)
+- Test with real Bybit data
+
+**Phase 3: File Export (Distributed)**
+- Add periodic export from `llm-trader-data`
+- Enable `llm-trader-rag` to read from files
+- Support S3/cloud storage
+
+**Phase 4: API Layer (Optional)**
+- If needed for remote ingestion
+- Add HTTP/gRPC endpoints to `llm-trader-data`
+
+### Success Criteria
+
+- ✅ Single source of truth for historical data
+- ✅ No duplicate data fetching logic
+- ✅ Schema version enforcement
+- ✅ Data freshness monitoring
+- ✅ Fast ingestion (<10ms per snapshot from LMDB)
+- ✅ Supports distributed deployment (file export)
+- ✅ Zero data drift between services
+
+---
+
 ## Summary
 
 This plan consolidates RAG implementation into a **2-3 week MVP** with:
@@ -1787,5 +2632,6 @@ This plan consolidates RAG implementation into a **2-3 week MVP** with:
 ✅ **Local embeddings** (FastEmbed) + vector DB (Qdrant)
 ✅ **Historical pattern context** enriching LLM decisions
 ✅ **Measurable improvement** over baseline signals
+✅ **Single source of truth** for historical data (llm-trader-data)
 
 The system provides **empirical evidence** about what typically happens in similar market conditions, allowing the LLM to make data-driven decisions instead of relying on general trading knowledge alone.

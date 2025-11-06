@@ -1898,7 +1898,33 @@ pub struct RagBacktestLog {
 
 ---
 
-## Phase 6: Embedding Functional Testing & Walk-Forward Evaluation
+## Phase 6: Historical Data Integration with llm-trader-data
+
+**DEPENDENCY:** This phase must be completed before Phase 7 (backtesting/evaluation) because meaningful walk-forward testing requires real historical data, not mock data.
+
+### Overview
+
+Establish `llm-trader-data` as the **single source of truth** for all historical data fetching and storage. This RAG service (`llm-trader-rag`) will consume historical data without duplicating data fetching logic.
+
+### Problem Statement
+
+Both `llm-trader-rag` and `llm-trader-data` need historical market data:
+- **llm-trader-rag**: Needs historical snapshots for RAG ingestion (embedding + indexing)
+- **llm-trader-data**: Already fetches historical data from exchanges (Bybit, Binance)
+
+**Risk**: Duplicating data fetching logic leads to:
+- Inconsistent data between services
+- Duplicate API calls to exchanges
+- Increased complexity and maintenance burden
+- Potential data drift and versioning issues
+
+*[Content continues in original Phase 7 section below]*
+
+---
+
+## Phase 7: Embedding Functional Testing & Walk-Forward Evaluation
+
+**DEPENDENCY:** Phase 6 (Historical Data Integration) must be completed first to provide real data for backtesting.
 
 ### Goals
 - Verify that retrieval-augmented evidence correlates with future returns and improves decisions vs a no‑RAG baseline.
@@ -2021,14 +2047,17 @@ metrics.finalize();
 
 ## Timeline
 
-| Phase | Duration | Key Deliverables |
-|-------|----------|------------------|
-| **1: Ingestion** | 3-5 days | Snapshot extractor, FastEmbed, Qdrant setup |
-| **2: Retrieval** | 2-3 days | RAG retriever, prompt enrichment |
-| **3: LLM Client** | 3-4 days | Async client, rate limiting, parsing |
-| **4: Integration** | 3-5 days | Strategy plugin, backtesting, guardrails |
-| **5: Deployment** | 2-3 days | Config, monitoring, testing |
-| **Total** | 13-20 days | **2-3 weeks for MVP** |
+| Phase | Duration | Key Deliverables | Status |
+|-------|----------|------------------|--------|
+| **1: Ingestion** | 3-5 days | Snapshot extractor, FastEmbed, Qdrant setup | ✅ COMPLETE |
+| **2: Retrieval** | 2-3 days | RAG retriever, prompt enrichment | ✅ COMPLETE |
+| **3: LLM Client** | 3-4 days | Async client, rate limiting, parsing | ✅ COMPLETE |
+| **4: JSON-RPC Server** | 3-5 days | RPC server, workflow-manager integration | ✅ COMPLETE |
+| **5: Config & Monitoring** | 2-3 days | TOML config, metrics, logging | ✅ COMPLETE |
+| **6: LMDB Integration** | 3-5 days | Real historical data, replace mock data | 🔄 NEXT |
+| **7: Backtesting** | 5-7 days | Walk-forward eval, calibration, testing | ⏳ PENDING |
+| **Phases 1-5 Total** | 13-20 days | **MVP (with mock data)** | ✅ DONE |
+| **Phases 6-7 Total** | 8-12 days | **Production-ready (with real data)** | 📋 TODO |
 
 ---
 
@@ -2081,23 +2110,7 @@ metrics.finalize();
 
 ---
 
-## Phase 7: Historical Data Integration with llm-trader-data
-
-### Overview
-
-Establish `llm-trader-data` as the **single source of truth** for all historical data fetching and storage. This RAG service (`llm-trader-rag`) will consume historical data without duplicating data fetching logic.
-
-### Problem Statement
-
-Both `llm-trader-rag` and `llm-trader-data` need historical market data:
-- **llm-trader-rag**: Needs historical snapshots for RAG ingestion (embedding + indexing)
-- **llm-trader-data**: Already fetches historical data from exchanges (Bybit, Binance)
-
-**Risk**: Duplicating data fetching logic leads to:
-- Inconsistent data between services
-- Duplicate API calls to exchanges
-- Increased complexity and maintenance burden
-- Potential data drift and versioning issues
+*[Phase 6 content moved above. This section continues the Phase 6 implementation details.]*
 
 ### Architecture: Single Source of Truth
 

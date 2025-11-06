@@ -77,6 +77,7 @@ pub struct MarketState {
 
 /// Query configuration with defaults
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // All fields used via serde deserialization
 pub struct QueryConfig {
     #[serde(default = "default_lookback_days")]
     pub lookback_days: u32,

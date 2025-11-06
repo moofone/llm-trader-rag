@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use trading_core::MarketStateSnapshot;

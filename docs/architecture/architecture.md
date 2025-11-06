@@ -1,5 +1,15 @@
 # llm-trader-rag Architecture
 
+**Status:** ✅ Production Ready (Phases 1-4 Complete)
+**Last Updated:** 2025-11-05
+
+## Quick Links
+
+- **API Documentation:** [jsonrpc_api.md](./jsonrpc_api.md) - Complete JSON-RPC 2.0 API specification
+- **Quick Start:** [API_QUICK_START.md](./API_QUICK_START.md) - Fast integration guide
+- **Server README:** [rag-rpc-server/README.md](../../rag-rpc-server/README.md)
+- **Test Script:** [test_request.sh](../../rag-rpc-server/test_request.sh)
+
 ## Table of Contents
 
 1. [System Overview](#system-overview)

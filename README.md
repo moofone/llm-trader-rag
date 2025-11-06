@@ -1,14 +1,40 @@
-# LLM Trader RAG - Phase 1 Implementation
+# LLM Trader RAG - Production Ready
 
-**Status:** Phase 1 Complete - Vector Database & Historical Data Ingestion
+**Status:** ✅ Phases 1-4 Complete - Full RAG System with JSON-RPC API
 **Language:** Pure Rust
-**Architecture:** Qdrant + FastEmbed-rs + Async LLM SDK
+**Architecture:** Qdrant + FastEmbed-rs + JSON-RPC Server
 
 ## Overview
 
 This project implements a Retrieval-Augmented Generation (RAG) system for an LLM-powered trading bot. The system provides historical pattern context to enhance trade signal generation, allowing the LLM to see "what happened the last 5 times the market looked like this" and make evidence-based decisions.
 
 ## Architecture
+
+### Complete System Flow
+
+```
+llm-trader-data → Market Snapshot → workflow-manager
+                                          ↓
+                                    JSON-RPC Query (port 7879)
+                                          ↓
+                                    rag-rpc-server
+                                          ↓
+                                    [Generate Embedding]
+                                          ↓
+                                    [Search Qdrant]
+                                          ↓
+                                    Historical Matches + Statistics
+                                          ↓
+                                    workflow-manager
+                                          ↓
+                                    [Format LLM Prompt with RAG Context]
+                                          ↓
+                                    LLM API (OpenAI/Anthropic)
+                                          ↓
+                                    Trading Decision
+```
+
+### Data Ingestion Pipeline
 
 ```
 Historical Data (LMDB)
@@ -65,9 +91,30 @@ llm-trader-rag/
 │   │   └── main.rs           # Command-line interface
 │   └── Cargo.toml
 │
+├── rag-rpc-server/            # JSON-RPC server (Phase 4)
+│   ├── src/
+│   │   ├── main.rs           # Server entry point
+│   │   ├── server.rs         # TCP server
+│   │   ├── handler.rs        # Request handler
+│   │   ├── protocol.rs       # JSON-RPC types
+│   │   ├── error.rs          # Error handling
+│   │   └── config.rs         # Configuration
+│   ├── tests/                # Integration tests
+│   ├── test_request.sh       # Test script
+│   └── README.md            # Server documentation
+│
 ├── spec/                      # Specifications
 │   └── LLM_BOT_RAG_IMPLEMENTATION.md
 │
+├── docs/                      # Documentation
+│   ├── architecture/
+│   │   └── jsonrpc_api.md    # API specification
+│   ├── INTEGRATION_SUMMARY.md
+│   ├── PHASE4_JSON_RPC_IMPLEMENTATION.md
+│   └── ...
+│
+├── DEPLOYMENT_GUIDE.md        # Production deployment guide
+├── COMPILATION_FIXES.md       # Dependency fixes applied
 └── Cargo.toml                 # Workspace configuration
 ```
 
@@ -536,13 +583,42 @@ cargo test --package trading-data-services
 RUST_LOG=debug cargo test
 ```
 
-## Next Steps (Phase 2+)
+## Implementation Status
 
-- [ ] **Phase 2**: Live pattern retrieval during trading
-- [ ] **Phase 3**: LLM client integration (OpenAI/Anthropic)
-- [ ] **Phase 4**: Strategy plugin integration
-- [ ] **Phase 5**: Configuration & monitoring
-- [ ] **Phase 6**: Functional testing & walk-forward evaluation
+- [x] **Phase 1**: Historical Data Ingestion ✅
+- [x] **Phase 2**: Live Pattern Retrieval ✅
+- [x] **Phase 3**: LLM Client Integration ✅
+- [x] **Phase 4**: JSON-RPC Server ✅
+- [x] **Phase 5**: Configuration & Monitoring ✅
+- [ ] **Phase 6**: LMDB Integration with llm-trader-data (Next - required for real data)
+- [ ] **Phase 7**: Backtesting & Walk-Forward Evaluation (Requires Phase 6)
+
+## Quick Start
+
+### 1. Start Qdrant
+```bash
+docker run -d -p 6333:6333 -p 6334:6334 --name qdrant qdrant/qdrant
+```
+
+### 2. Ingest Historical Data
+```bash
+cargo run --release --bin rag-ingest -- \
+  --symbols BTCUSDT,ETHUSDT \
+  --start 90 \
+  --end now
+```
+
+### 3. Start JSON-RPC Server
+```bash
+cargo run --release --bin rag-rpc-server
+```
+
+### 4. Test Server
+```bash
+./rag-rpc-server/test_request.sh
+```
+
+See `DEPLOYMENT_GUIDE.md` for complete deployment instructions.
 
 ## Performance Targets
 

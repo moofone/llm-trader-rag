@@ -6,7 +6,6 @@ mod error;
 
 use anyhow::Result;
 use clap::Parser;
-use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use config::ServerConfig;

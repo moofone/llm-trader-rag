@@ -4,7 +4,7 @@ use std::sync::Arc;
 use trading_core::TimestampMS;
 use tracing;
 
-use super::snapshot_extractor::HistoricalSnapshotExtractor;
+use super::snapshot_extractor::{DataSource, HistoricalSnapshotExtractor};
 use super::snapshot_formatter::SnapshotFormatter;
 use super::vector_store::{snapshot_to_point, VectorStore};
 
@@ -28,9 +28,34 @@ pub struct HistoricalIngestionPipeline {
 }
 
 impl HistoricalIngestionPipeline {
-    /// Create a new ingestion pipeline
+    /// Create a new ingestion pipeline with mock data
     pub async fn new(qdrant_url: &str, collection_name: String) -> Result<Self> {
-        tracing::info!("Initializing ingestion pipeline...");
+        Self::new_with_data_source(qdrant_url, collection_name, DataSource::Mock, None).await
+    }
+
+    /// Create a new ingestion pipeline with LMDB data source
+    pub async fn with_lmdb(
+        qdrant_url: &str,
+        collection_name: String,
+        lmdb_path: &str,
+    ) -> Result<Self> {
+        Self::new_with_data_source(
+            qdrant_url,
+            collection_name,
+            DataSource::Lmdb,
+            Some(lmdb_path.to_string()),
+        )
+        .await
+    }
+
+    /// Create a new ingestion pipeline with specified data source
+    async fn new_with_data_source(
+        qdrant_url: &str,
+        collection_name: String,
+        data_source: DataSource,
+        lmdb_path: Option<String>,
+    ) -> Result<Self> {
+        tracing::info!("Initializing ingestion pipeline with data source: {:?}", data_source);
 
         // Initialize embedding model (downloads BGE model on first run)
         tracing::info!("Loading embedding model (BGE-small-en-v1.5)...");
@@ -38,8 +63,20 @@ impl HistoricalIngestionPipeline {
             InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(true),
         )?;
 
-        // Initialize snapshot extractor
-        let snapshot_extractor = Arc::new(HistoricalSnapshotExtractor::new());
+        // Initialize snapshot extractor based on data source
+        let snapshot_extractor = match data_source {
+            DataSource::Mock => {
+                tracing::info!("Using mock data source for testing");
+                Arc::new(HistoricalSnapshotExtractor::new())
+            }
+            DataSource::Lmdb => {
+                let path = lmdb_path
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("LMDB path required for LMDB data source"))?;
+                tracing::info!("Using LMDB data source at: {}", path);
+                Arc::new(HistoricalSnapshotExtractor::with_lmdb(path)?)
+            }
+        };
 
         // Initialize vector store
         let vector_store = Arc::new(VectorStore::new(qdrant_url, collection_name).await?);

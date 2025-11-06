@@ -1,23 +1,23 @@
 use anyhow::Result;
-use qdrant_client::prelude::*;
 use qdrant_client::qdrant::{
-    vectors_config::Config, CreateCollection, Distance, VectorParams, VectorsConfig,
-    Filter, ScoredPoint,
+    CreateCollectionBuilder, Distance, Filter, PointStruct, ScoredPoint,
+    SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
+use qdrant_client::Qdrant;
 use serde_json;
 use trading_core::MarketStateSnapshot;
 use tracing;
 
 /// Qdrant vector store for market snapshots
 pub struct VectorStore {
-    client: QdrantClient,
+    client: Qdrant,
     collection_name: String,
 }
 
 impl VectorStore {
     /// Initialize Qdrant client (embedded for dev, cloud for prod)
     pub async fn new(qdrant_url: &str, collection_name: String) -> Result<Self> {
-        let client = QdrantClient::from_url(qdrant_url).build()?;
+        let client = Qdrant::from_url(qdrant_url).build()?;
 
         tracing::info!("Connecting to Qdrant at {}", qdrant_url);
 
@@ -31,17 +31,10 @@ impl VectorStore {
     pub async fn create_collection_if_not_exists(&self, dimension: u64) -> Result<()> {
         match self
             .client
-            .create_collection(&CreateCollection {
-                collection_name: self.collection_name.clone(),
-                vectors_config: Some(VectorsConfig {
-                    config: Some(Config::Params(VectorParams {
-                        size: dimension,
-                        distance: Distance::Cosine.into(),
-                        ..Default::default()
-                    })),
-                }),
-                ..Default::default()
-            })
+            .create_collection(
+                CreateCollectionBuilder::new(&self.collection_name)
+                    .vectors_config(VectorParamsBuilder::new(dimension, Distance::Cosine))
+            )
             .await
         {
             Ok(_) => {
@@ -69,7 +62,7 @@ impl VectorStore {
         tracing::info!("Upserting {} points to Qdrant", points.len());
 
         self.client
-            .upsert_points_blocking(self.collection_name.clone(), None, points, None)
+            .upsert_points(UpsertPointsBuilder::new(&self.collection_name, points))
             .await?;
 
         Ok(())
@@ -83,17 +76,20 @@ impl VectorStore {
         filter: Option<Filter>,
         score_threshold: Option<f32>,
     ) -> Result<Vec<ScoredPoint>> {
+        let mut search_builder = SearchPointsBuilder::new(&self.collection_name, query_vector, limit)
+            .with_payload(true);
+
+        if let Some(f) = filter {
+            search_builder = search_builder.filter(f);
+        }
+
+        if let Some(threshold) = score_threshold {
+            search_builder = search_builder.score_threshold(threshold);
+        }
+
         let search_result = self
             .client
-            .search_points(&SearchPoints {
-                collection_name: self.collection_name.clone(),
-                vector: query_vector,
-                filter,
-                limit,
-                with_payload: Some(true.into()),
-                score_threshold,
-                ..Default::default()
-            })
+            .search_points(search_builder)
             .await?;
 
         Ok(search_result.result)

@@ -212,21 +212,37 @@ impl LlmClient {
 
     /// Parse the LLM response to extract trading signal
     ///
-    /// Looks for keywords: LONG, SHORT, HOLD
+    /// Looks for explicit action markers: "A) LONG", "B) SHORT", "C) HOLD"
+    /// Falls back to keyword detection if markers not found
     ///
     /// # Returns
     /// Parsed trading decision
     pub fn parse_signal(response: &LlmResponse) -> Result<TradingDecision> {
         let text = response.raw_response.to_uppercase();
 
-        let decision = if text.contains("LONG") && !text.contains("SHORT") {
+        // First, try to find explicit action markers (preferred format)
+        let decision = if text.contains("A) LONG") || text.contains("A)LONG") {
             SignalAction::Long
-        } else if text.contains("SHORT") && !text.contains("LONG") {
+        } else if text.contains("B) SHORT") || text.contains("B)SHORT") {
             SignalAction::Short
-        } else if text.contains("HOLD") {
+        } else if text.contains("C) HOLD") || text.contains("C)HOLD") {
+            SignalAction::Hold
+        }
+        // Fallback: look for standalone keywords with word boundaries
+        else if text.contains(" LONG ") || text.contains("\nLONG") || text.contains("LONG\n") {
+            if text.contains(" SHORT ") || text.contains("\nSHORT") || text.contains("SHORT\n") {
+                // Both LONG and SHORT present - ambiguous, default to HOLD
+                tracing::warn!("Ambiguous signal (both LONG and SHORT detected), defaulting to HOLD");
+                SignalAction::Hold
+            } else {
+                SignalAction::Long
+            }
+        } else if text.contains(" SHORT ") || text.contains("\nSHORT") || text.contains("SHORT\n") {
+            SignalAction::Short
+        } else if text.contains(" HOLD ") || text.contains("\nHOLD") || text.contains("HOLD\n") {
             SignalAction::Hold
         } else {
-            // If ambiguous or unclear, default to HOLD (conservative)
+            // If unclear, default to HOLD (conservative)
             tracing::warn!("Could not parse clear signal from LLM response, defaulting to HOLD");
             SignalAction::Hold
         };

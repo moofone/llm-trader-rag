@@ -18,11 +18,11 @@ struct Args {
 
     /// Start date (RFC3339 format or days ago)
     /// Examples: "2025-10-01T00:00:00Z" or "90" (for 90 days ago)
-    #[arg(short = 's', long, default_value = "90")]
+    #[arg(long, default_value = "90")]
     start: String,
 
     /// End date (RFC3339 format or "now")
-    #[arg(short = 'e', long, default_value = "now")]
+    #[arg(long, default_value = "now")]
     end: String,
 
     /// Snapshot interval in minutes
@@ -36,6 +36,14 @@ struct Args {
     /// Qdrant collection name
     #[arg(short = 'c', long, default_value = "trading_patterns")]
     collection: String,
+
+    /// Data source: "mock" for testing, "lmdb" for real data
+    #[arg(short = 'd', long, default_value = "mock")]
+    data_source: String,
+
+    /// LMDB database path (required if data-source is "lmdb")
+    #[arg(long, default_value = "/shared/data/trading/lmdb")]
+    lmdb_path: String,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(short = 'l', long, default_value = "info")]
@@ -113,12 +121,32 @@ async fn main() -> Result<()> {
     info!("  Interval: {} minutes", args.interval);
     info!("  Qdrant URL: {}", args.qdrant_url);
     info!("  Collection: {}", args.collection);
+    info!("  Data Source: {}", args.data_source);
+    if args.data_source == "lmdb" {
+        info!("  LMDB Path: {}", args.lmdb_path);
+    }
     info!("");
 
-    // Create ingestion pipeline
+    // Create ingestion pipeline based on data source
     info!("Initializing ingestion pipeline...");
-    let mut pipeline =
-        HistoricalIngestionPipeline::new(&args.qdrant_url, args.collection).await?;
+    let mut pipeline = match args.data_source.to_lowercase().as_str() {
+        "lmdb" => {
+            HistoricalIngestionPipeline::with_lmdb(
+                &args.qdrant_url,
+                args.collection,
+                &args.lmdb_path
+            ).await?
+        }
+        "mock" => {
+            HistoricalIngestionPipeline::new(&args.qdrant_url, args.collection).await?
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Invalid data source '{}'. Must be 'mock' or 'lmdb'",
+                args.data_source
+            ));
+        }
+    };
 
     info!("Pipeline initialized successfully");
     info!("");
@@ -156,6 +184,8 @@ mod tests {
             interval: 15,
             qdrant_url: "".to_string(),
             collection: "".to_string(),
+            data_source: "mock".to_string(),
+            lmdb_path: "".to_string(),
             log_level: "info".to_string(),
         };
 
@@ -176,6 +206,8 @@ mod tests {
             interval: 15,
             qdrant_url: "".to_string(),
             collection: "".to_string(),
+            data_source: "mock".to_string(),
+            lmdb_path: "".to_string(),
             log_level: "info".to_string(),
         };
 

@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[allow(dead_code)] // Some variants reserved for future use
 pub enum RpcError {
     #[error("Parse error: {0}")]
     ParseError(String),

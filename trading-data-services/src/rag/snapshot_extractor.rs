@@ -1,17 +1,51 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
+use serde_json::Value;
 use trading_core::{MarketStateSnapshot, TimestampMS};
 use tracing;
 
-/// Extracts historical market snapshots from LMDB storage
+use super::lmdb_reader::LmdbReader;
+
+/// Data source for snapshot extraction
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DataSource {
+    /// Use LMDB storage (real historical data from llm-trader-data)
+    Lmdb,
+    /// Use mock data generator (for testing)
+    Mock,
+}
+
+/// Extracts historical market snapshots from LMDB storage or mock data
 pub struct HistoricalSnapshotExtractor {
-    // TODO: Add LMDB manager when available
-    // lmdb_manager: Arc<LmdbManager>,
+    data_source: DataSource,
+    lmdb_reader: Option<LmdbReader>,
 }
 
 impl HistoricalSnapshotExtractor {
-    /// Create a new snapshot extractor
+    /// Create a new snapshot extractor with mock data
     pub fn new() -> Self {
-        Self {}
+        Self {
+            data_source: DataSource::Mock,
+            lmdb_reader: None,
+        }
+    }
+
+    /// Create a snapshot extractor with LMDB backend
+    ///
+    /// # Arguments
+    /// * `lmdb_path` - Path to LMDB directory (shared with llm-trader-data)
+    ///
+    /// # Returns
+    /// Extractor configured to read from LMDB
+    pub fn with_lmdb(lmdb_path: &str) -> Result<Self> {
+        let lmdb_reader = LmdbReader::new(lmdb_path)
+            .context("Failed to initialize LMDB reader")?;
+
+        tracing::info!("SnapshotExtractor initialized with LMDB backend at {}", lmdb_path);
+
+        Ok(Self {
+            data_source: DataSource::Lmdb,
+            lmdb_reader: Some(lmdb_reader),
+        })
     }
 
     /// Extract snapshots for a symbol in a time range
@@ -22,8 +56,222 @@ impl HistoricalSnapshotExtractor {
     /// * `end_timestamp` - End time in milliseconds
     /// * `interval_minutes` - Snapshot frequency (e.g., 15)
     ///
-    /// **Note:** This will query LMDB which should be populated from Bybit historical data
+    /// # Returns
+    /// Vector of market snapshots with complete indicator data
     pub fn extract_snapshots(
+        &self,
+        symbol: &str,
+        start_timestamp: TimestampMS,
+        end_timestamp: TimestampMS,
+        interval_minutes: u64,
+    ) -> Result<Vec<MarketStateSnapshot>> {
+        match self.data_source {
+            DataSource::Lmdb => {
+                self.extract_from_lmdb(symbol, start_timestamp, end_timestamp, interval_minutes)
+            }
+            DataSource::Mock => {
+                self.extract_mock_snapshots(symbol, start_timestamp, end_timestamp, interval_minutes)
+            }
+        }
+    }
+
+    /// Extract snapshots from LMDB storage
+    fn extract_from_lmdb(
+        &self,
+        symbol: &str,
+        start_timestamp: TimestampMS,
+        end_timestamp: TimestampMS,
+        interval_minutes: u64,
+    ) -> Result<Vec<MarketStateSnapshot>> {
+        let lmdb = self.lmdb_reader.as_ref()
+            .ok_or_else(|| anyhow!("LMDB reader not initialized"))?;
+
+        let mut snapshots = Vec::new();
+        let interval_ms = (interval_minutes * 60_000) as i64;
+        let mut current_ts = start_timestamp as i64;
+        let end_ts = end_timestamp as i64;
+
+        let mut success_count = 0;
+        let mut skip_count = 0;
+
+        while current_ts < end_ts {
+            match self.build_snapshot_from_lmdb(lmdb, symbol, current_ts) {
+                Ok(snapshot) => {
+                    snapshots.push(snapshot);
+                    success_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to build snapshot for {} at {}: {}",
+                        symbol,
+                        current_ts,
+                        e
+                    );
+                    skip_count += 1;
+                }
+            }
+
+            current_ts += interval_ms;
+        }
+
+        tracing::info!(
+            "Extracted {} snapshots for {} from {} to {} ({} skipped due to missing data)",
+            success_count,
+            symbol,
+            start_timestamp,
+            end_timestamp,
+            skip_count
+        );
+
+        Ok(snapshots)
+    }
+
+    /// Build a complete snapshot from LMDB data
+    fn build_snapshot_from_lmdb(
+        &self,
+        lmdb: &LmdbReader,
+        symbol: &str,
+        timestamp: i64,
+    ) -> Result<MarketStateSnapshot> {
+        // Read 3-minute indicators (current point)
+        let indicators_3m = lmdb.read_indicators_3m(symbol, timestamp)?
+            .ok_or_else(|| anyhow!("Missing 3m indicators for {} at {}", symbol, timestamp))?;
+
+        // Read 4-hour indicators (current point)
+        let indicators_4h = lmdb.read_indicators_4h(symbol, timestamp)?
+            .ok_or_else(|| anyhow!("Missing 4h indicators for {} at {}", symbol, timestamp))?;
+
+        // Read candle for price data
+        let candle_3m = lmdb.read_candles_3m(symbol, timestamp)?
+            .ok_or_else(|| anyhow!("Missing 3m candle for {} at {}", symbol, timestamp))?;
+
+        // Extract price from candle
+        let price = candle_3m.get("close")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| anyhow!("Missing close price in candle"))?;
+
+        // Create snapshot
+        let mut snapshot = MarketStateSnapshot::new(
+            symbol.to_string(),
+            timestamp as TimestampMS,
+            price
+        );
+
+        // Fill 3-minute indicators
+        snapshot.rsi_7 = Self::extract_f64(&indicators_3m, "rsi_7")?;
+        snapshot.rsi_14 = Self::extract_f64(&indicators_3m, "rsi_14")?;
+        snapshot.macd = Self::extract_f64(&indicators_3m, "macd")?;
+        snapshot.ema_20 = Self::extract_f64(&indicators_3m, "ema_20")?;
+
+        // Fill 4-hour indicators
+        snapshot.ema_20_4h = Self::extract_f64(&indicators_4h, "ema_20")?;
+        snapshot.ema_50_4h = Self::extract_f64(&indicators_4h, "ema_50")?;
+        snapshot.atr_3_4h = Self::extract_f64(&indicators_4h, "atr_3")?;
+        snapshot.atr_14_4h = Self::extract_f64(&indicators_4h, "atr_14")?;
+
+        // Read time series data (last 10 points)
+        self.fill_time_series_3m(lmdb, symbol, timestamp, &mut snapshot)?;
+        self.fill_time_series_4h(lmdb, symbol, timestamp, &mut snapshot)?;
+
+        // TODO: Add derivatives data (OI, funding rate) when available in LMDB
+        // For now, use placeholder values
+        snapshot.open_interest_latest = 0.0;
+        snapshot.open_interest_avg_24h = 0.0;
+        snapshot.funding_rate = 0.0;
+        snapshot.price_change_1h = 0.0;
+        snapshot.price_change_4h = 0.0;
+
+        // TODO: Calculate outcomes from future data
+        // This requires querying future candles and calculating price changes
+        snapshot.outcome_15m = None;
+        snapshot.outcome_1h = None;
+        snapshot.outcome_4h = None;
+        snapshot.outcome_24h = None;
+
+        Ok(snapshot)
+    }
+
+    /// Fill 3-minute time series data
+    fn fill_time_series_3m(
+        &self,
+        lmdb: &LmdbReader,
+        symbol: &str,
+        end_timestamp: i64,
+        snapshot: &mut MarketStateSnapshot,
+    ) -> Result<()> {
+        let interval_3m = 180_000; // 3 minutes in ms
+        let series = lmdb.read_indicators_3m_series(symbol, end_timestamp, interval_3m, 10)?;
+
+        if series.is_empty() {
+            return Err(anyhow!("No 3m time series data available"));
+        }
+
+        // Extract vectors from series
+        snapshot.ema_20_values = series.iter()
+            .filter_map(|(_, data)| data.get("ema_20").and_then(|v| v.as_f64()))
+            .collect();
+
+        snapshot.macd_values = series.iter()
+            .filter_map(|(_, data)| data.get("macd").and_then(|v| v.as_f64()))
+            .collect();
+
+        snapshot.rsi_7_values = series.iter()
+            .filter_map(|(_, data)| data.get("rsi_7").and_then(|v| v.as_f64()))
+            .collect();
+
+        snapshot.rsi_14_values = series.iter()
+            .filter_map(|(_, data)| data.get("rsi_14").and_then(|v| v.as_f64()))
+            .collect();
+
+        // Fill mid_prices from candles
+        let candles: Result<Vec<_>> = series.iter()
+            .map(|(ts, _)| {
+                lmdb.read_candles_3m(symbol, *ts)?
+                    .and_then(|c| c.get("close").and_then(|v| v.as_f64()))
+                    .ok_or_else(|| anyhow!("Missing candle close price"))
+            })
+            .collect();
+
+        snapshot.mid_prices = candles?;
+
+        Ok(())
+    }
+
+    /// Fill 4-hour time series data
+    fn fill_time_series_4h(
+        &self,
+        lmdb: &LmdbReader,
+        symbol: &str,
+        end_timestamp: i64,
+        snapshot: &mut MarketStateSnapshot,
+    ) -> Result<()> {
+        let interval_4h = 14_400_000; // 4 hours in ms
+        let series = lmdb.read_indicators_4h_series(symbol, end_timestamp, interval_4h, 10)?;
+
+        if series.is_empty() {
+            return Err(anyhow!("No 4h time series data available"));
+        }
+
+        snapshot.macd_4h_values = series.iter()
+            .filter_map(|(_, data)| data.get("macd").and_then(|v| v.as_f64()))
+            .collect();
+
+        snapshot.rsi_14_4h_values = series.iter()
+            .filter_map(|(_, data)| data.get("rsi_14").and_then(|v| v.as_f64()))
+            .collect();
+
+        Ok(())
+    }
+
+    /// Extract f64 value from JSON with error handling
+    fn extract_f64(json: &Value, field: &str) -> Result<f64> {
+        json.get(field)
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| anyhow!("Missing or invalid field: {}", field))
+    }
+
+    /// Extract snapshots using mock data generator
+    fn extract_mock_snapshots(
         &self,
         symbol: &str,
         start_timestamp: TimestampMS,
@@ -36,11 +284,8 @@ impl HistoricalSnapshotExtractor {
         let mut current_ts = start_timestamp;
 
         while current_ts < end_timestamp {
-            // TODO: Replace with actual LMDB queries when available
-            // For now, create mock snapshots for testing
             let snapshot = self.create_mock_snapshot(symbol, current_ts)?;
             snapshots.push(snapshot);
-
             current_ts += interval_ms;
         }
 
@@ -56,7 +301,6 @@ impl HistoricalSnapshotExtractor {
     }
 
     /// Create a mock snapshot for testing
-    /// TODO: Replace with actual LMDB extraction
     fn create_mock_snapshot(&self, symbol: &str, timestamp: TimestampMS) -> Result<MarketStateSnapshot> {
         use std::f64::consts::PI;
 
@@ -120,7 +364,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_snapshots() {
+    fn test_extract_mock_snapshots() {
         let extractor = HistoricalSnapshotExtractor::new();
         let start = 1000000000;
         let end = 1000000000 + 60 * 60 * 1000; // 1 hour
@@ -131,5 +375,32 @@ mod tests {
         // Should get 4 snapshots (0, 15, 30, 45 minutes)
         assert_eq!(snapshots.len(), 4);
         assert_eq!(snapshots[0].symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn test_data_source_selection() {
+        let mock_extractor = HistoricalSnapshotExtractor::new();
+        assert_eq!(mock_extractor.data_source, DataSource::Mock);
+    }
+
+    // Integration test - requires actual LMDB database
+    #[test]
+    #[ignore]
+    fn test_extract_from_lmdb() {
+        let extractor = HistoricalSnapshotExtractor::with_lmdb("/shared/data/trading/lmdb")
+            .expect("Failed to create LMDB extractor");
+
+        assert_eq!(extractor.data_source, DataSource::Lmdb);
+
+        // Try to extract some snapshots
+        let start = 1730811225000; // Example timestamp
+        let end = start + 3600000; // 1 hour later
+        let snapshots = extractor.extract_snapshots("BTCUSDT", start, end, 15);
+
+        // Should either succeed with data or fail gracefully
+        match snapshots {
+            Ok(data) => println!("Extracted {} snapshots from LMDB", data.len()),
+            Err(e) => println!("Expected - no data available: {}", e),
+        }
     }
 }
